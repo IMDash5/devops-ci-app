@@ -3,6 +3,7 @@ name: CI — verify and publish image
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -117,8 +118,16 @@ jobs:
           docker tag "devops-ci-app:${GITHUB_SHA}" "${IMAGE_NAME}:${GITHUB_SHA}"
           docker tag "devops-ci-app:${GITHUB_SHA}" "${IMAGE_NAME}:latest"
 
+      - name: Tag release image
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          docker tag "devops-ci-app:${GITHUB_SHA}" "${IMAGE_NAME}:${VERSION}"
+          echo "Git tag ${GITHUB_REF_NAME} -> image tag ${VERSION} -> commit ${GITHUB_SHA}"
+
       - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: printf '%s\n' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
@@ -126,5 +135,18 @@ jobs:
       - name: Push image
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
-          docker push "${IMAGE_NAME}:${GITHUB_SHA}"
-          docker push "${IMAGE_NAME}:latest"
+          set -euo pipefail
+          docker push "${IMAGE_NAME}:${GITHUB_SHA}" | tee push-sha.log
+          docker push "${IMAGE_NAME}:latest" | tee push-latest.log
+          grep -E 'digest: sha256:' push-sha.log push-latest.log
+
+      - name: Push release image
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "${IMAGE_NAME}:${VERSION}" >/dev/null 2>&1; then
+            echo "::error::${IMAGE_NAME}:${VERSION} already exists; release tags are immutable"
+            exit 1
+          fi
+          docker push "${IMAGE_NAME}:${VERSION}" | tee push-version.log
+          grep -E 'digest: sha256:' push-version.log
